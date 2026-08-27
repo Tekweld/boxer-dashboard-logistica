@@ -425,7 +425,7 @@ async function fetchRecebimentoZenerp(codigos) {
 }
 
 // Busca o ESTOQUE_ATUAL no ZenERP para cada código informado, via stockAvailabilityCube
-// (retorna quantity_stock já pronto, sem precisar filtrar/classificar por endereço).
+// (usa quantity_balance; valores negativos são zerados antes de ir pro banco).
 // Retorna { values, matched, total }, ou null se a API falhar.
 async function fetchEstoqueZenerp(codigos) {
   const jsonBodyEstoque = {
@@ -472,7 +472,8 @@ async function fetchEstoqueZenerp(codigos) {
       return 0;
     }
     matched++;
-    return linhas.reduce((soma, row) => soma + (Number(row.quantity_stock) || 0), 0);
+    const soma = linhas.reduce((s, row) => s + (Number(row.quantity_balance) || 0), 0);
+    return Math.max(soma, 0);
   });
 
   console.log(`[Estoque] ${matched}/${codigos.length} código(s) da planilha encontrados na resposta do ZenERP.`);
