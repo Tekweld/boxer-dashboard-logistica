@@ -349,20 +349,41 @@ const SB_ANON = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsIn
 // TODO: preencher com o token de acesso do ZenERP
 const ZENERP_TOKEN = 'eyJhbGciOiJIUzI1NiJ9.eyJqdGkiOiJkNjg1YzNmMy0xNmE3LTQwMTItODRjMy0yOGFkZTIzZTRmZDEiLCJzdWIiOiJicnVub0Bib3hlcnNvbGRhcy5jb20uYnIiLCJuYmYiOjE3NDc2NjU1NzQsImlhdCI6MTc0NzY2NTU3NCwibG9jYWxlIjoicHQtQlIiLCJ0aW1lWm9uZSI6IkFtZXJpY2EvU2FvX1BhdWxvIn0.S8KpowR1e5BbW7nUIMNF9zGZ_3GINOm6ct6fg2Y-nGA';
 
-// Chamada genérica de API que nunca lança exceção — retorna { ok, data }
-async function chamarApiJson(label, url, options) {
-  try {
-    const res = await fetch(url, options);
-    if (!res.ok) {
-      console.error(`[${label}] HTTP ${res.status}`);
-      return { ok: false, data: null };
+function esperar(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function fetchComTimeout(url, options, timeoutMs) {
+  return Promise.race([
+    fetch(url, options),
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`Timeout após ${timeoutMs / 1000}s`)), timeoutMs))
+  ]);
+}
+
+// Chamada genérica de API que nunca lança exceção — retorna { ok, data }.
+// Tenta de novo só em falha de rede/timeout (não em resposta HTTP de erro), com timeout curto
+// pra não travar a tela — se der ruim, quem chamou cai no fallback pra planilha rapidamente.
+async function chamarApiJson(label, url, options, maxTentativas = 2, timeoutMs = 10000, intervaloEsperaMs = 3000) {
+  let ultimoErro = null;
+  for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
+    try {
+      const res = await fetchComTimeout(url, options, timeoutMs);
+      if (!res.ok) {
+        console.error(`[${label}] HTTP ${res.status}`);
+        return { ok: false, data: null };
+      }
+      const data = await res.json();
+      return { ok: true, data };
+    } catch (e) {
+      ultimoErro = e;
+      console.error(`[${label}] Falha na tentativa ${tentativa}/${maxTentativas}:`, e);
+      if (tentativa < maxTentativas) {
+        await esperar(intervaloEsperaMs);
+      }
     }
-    const data = await res.json();
-    return { ok: true, data };
-  } catch (e) {
-    console.error(`[${label}] Falha na chamada:`, e);
-    return { ok: false, data: null };
   }
+  console.error(`[${label}] Falhou após ${maxTentativas} tentativa(s). Último erro:`, ultimoErro);
+  return { ok: false, data: null };
 }
 
 // Busca o RECEBIMENTO no ZenERP para cada código informado.
@@ -482,6 +503,41 @@ async function fetchEstoqueZenerp(codigos) {
   }
 
   return { values, matched, total: codigos.length };
+}
+
+// Busca o catálogo de produtos (CODIGO/NOME) direto no ZenERP, dispensando a aba "Data" da planilha.
+// Retorna um array de { CODIGO, NOME }, ou null se a API falhar (uso pelo caller como sinal de fallback).
+async function fetchCatalogoZenerp() {
+  showToast('Coletando dados...', 'info', true);
+
+  const resultado = await chamarApiJson(
+    "Catálogo de Produtos",
+    "https://api.zenerp.app.br/catalog/product/productPacking?order=+product.id",
+    {
+      method: "GET",
+      headers: {
+        "Tenant": "boxer",
+        "Authorization": "Bearer " + ZENERP_TOKEN,
+        "Content-Type": "application/json"
+      }
+    }
+  );
+
+  if (!resultado.ok) return null;
+
+  const json = resultado.data;
+  if (!Array.isArray(json)) {
+    console.error('[Catálogo] Resposta da API não veio como lista (formato inesperado):', json);
+    return null;
+  }
+  console.log(`[Catálogo] API ZenERP retornou ${json.length} produto(s).`);
+
+  return json
+    .map(item => ({
+      CODIGO: String(item.code || '').trim(),
+      NOME: String((item.product && item.product.description) || '').trim(),
+    }))
+    .filter(r => r.CODIGO);
 }
 
 // AUTH CHECK
@@ -703,18 +759,21 @@ function parseBoxer(wb) {
   })).filter(r => r.ITEM);
 }
 
-async function parseStock(wb) {
+// Lê a aba Data/Base/Stock/Estoque/Saldo da planilha, se existir. Serve hoje só como
+// fallback: da lista de produtos (quando a API de catálogo falha) e dos valores de
+// ESTOQUE_ATUAL/RECEBIMENTO (quando as respectivas chamadas ao ZenERP falham).
+function lerStockDaPlanilha(wb) {
   const sheetName = wb.SheetNames.find(n => {
     const l = n.toLowerCase();
     return l === 'data' || l.includes('base') || l.includes('stock') ||
            l.includes('estoque') || l.includes('saldo');
   });
-  if (!sheetName) { allStock = []; return; }
+  if (!sheetName) return [];
   const ws = wb.Sheets[sheetName];
 
   // Lê em formato array para busca por nome parcial de coluna
   const raw = XLSX.utils.sheet_to_json(ws, { header: 1, defval: '' });
-  if (raw.length < 2) { allStock = []; return; }
+  if (raw.length < 2) return [];
 
   const headers = raw[0].map(h => String(h || '').trim().toUpperCase());
 
@@ -733,16 +792,43 @@ async function parseStock(wb) {
 
   const get = (row, idx) => idx >= 0 ? (row[idx] !== undefined ? row[idx] : '') : '';
 
-  allStock = raw.slice(1).map(row => ({
+  return raw.slice(1).map(row => ({
     CODIGO: String(get(row, iCodigo)).trim(),
     NOME: String(get(row, iNome)).trim(),
     ESTOQUE_ATUAL: Number(get(row, iEstoque)) || 0,
     RECEBIMENTO: Number(get(row, iReceb)) || 0,
   })).filter(r => r.CODIGO);
+}
+
+async function parseStock(wb) {
+  const excelStock = lerStockDaPlanilha(wb);
+  const excelByCodigo = new Map(excelStock.map(r => [r.CODIGO, r]));
+
+  // A lista de produtos (CODIGO/NOME) agora vem preferencialmente do catálogo do ZenERP,
+  // dispensando a aba Data da planilha. Se a API falhar, cai de volta pra lista da planilha.
+  const catalogo = await fetchCatalogoZenerp();
+  let baseList;
+  if (catalogo && catalogo.length) {
+    baseList = catalogo;
+    console.log(`[Catálogo] Usando lista de ${catalogo.length} produto(s) da API ZenERP.`);
+  } else {
+    console.warn('[Catálogo] API ZenERP indisponível ou vazia, usando lista de produtos da planilha.');
+    baseList = excelStock.map(r => ({ CODIGO: r.CODIGO, NOME: r.NOME }));
+  }
+
+  allStock = baseList.map(item => {
+    const fallback = excelByCodigo.get(item.CODIGO);
+    return {
+      CODIGO: item.CODIGO,
+      NOME: item.NOME || (fallback ? fallback.NOME : ''),
+      ESTOQUE_ATUAL: fallback ? fallback.ESTOQUE_ATUAL : 0,
+      RECEBIMENTO: fallback ? fallback.RECEBIMENTO : 0,
+    };
+  });
 
   // Tenta atualizar RECEBIMENTO e ESTOQUE_ATUAL com dado ao vivo do ZenERP; se alguma das
-  // chamadas falhar ou não achar nenhuma correspondência, mantém os valores lidos da planilha
-  // para aquele campo especificamente (fallback independente por campo).
+  // chamadas falhar ou não achar nenhuma correspondência, mantém os valores já definidos acima
+  // (da planilha, ou 0 quando não há planilha) para aquele campo especificamente.
   if (allStock.length) {
     const codigos = allStock.map(r => r.CODIGO);
     const [recebimento, estoque] = await Promise.all([
@@ -754,19 +840,19 @@ async function parseStock(wb) {
     if (recebOk) {
       allStock.forEach((r, i) => { r.RECEBIMENTO = recebimento.values[i]; });
     } else {
-      console.warn('[Recebimento] API ZenERP indisponível ou sem correspondências, mantendo valores da planilha.');
+      console.warn('[Recebimento] API ZenERP indisponível ou sem correspondências, mantendo valores da planilha (ou 0, se não houver planilha).');
     }
 
     const estoqueOk = estoque && estoque.matched > 0;
     if (estoqueOk) {
       allStock.forEach((r, i) => { r.ESTOQUE_ATUAL = estoque.values[i]; });
     } else {
-      console.warn('[Estoque] API ZenERP indisponível ou sem correspondências, mantendo valores da planilha.');
+      console.warn('[Estoque] API ZenERP indisponível ou sem correspondências, mantendo valores da planilha (ou 0, se não houver planilha).');
     }
 
     const partes = [
-      recebOk ? `Recebimento ${recebimento.matched}/${recebimento.total}` : 'Recebimento: planilha',
-      estoqueOk ? `Estoque ${estoque.matched}/${estoque.total}` : 'Estoque: planilha'
+      recebOk ? `Recebimento ${recebimento.matched}/${recebimento.total}` : 'Recebimento: fallback',
+      estoqueOk ? `Estoque ${estoque.matched}/${estoque.total}` : 'Estoque: fallback'
     ];
     showToast(
       `ZenERP — ${partes.join(' · ')}`,
