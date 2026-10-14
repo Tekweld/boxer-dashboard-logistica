@@ -446,8 +446,9 @@ async function fetchRecebimentoZenerp(codigos) {
 }
 
 // Busca o ESTOQUE_ATUAL no ZenERP para cada código informado: soma de `quantity` nos
-// endereços físicos (MAQUINAS/PECAS) do stockCube, menos `quantity_outgoing` (negativo)
-// do stockAvailabilityCube; valores negativos são zerados antes de ir pro banco.
+// endereços físicos (MAQUINAS/PECAS) do stockCube, mais `quantity_outgoing` (já negativo,
+// então soma desconta a saída) do stockAvailabilityCube; valores negativos são zerados
+// antes de ir pro banco.
 // Retorna { values, matched, total }, ou null se a API falhar.
 async function fetchEstoqueZenerp(codigos) {
 
@@ -533,9 +534,9 @@ async function fetchEstoqueZenerp(codigos) {
     const somaFisico = jsonFisico
       .filter(row => String(row.product_code) === String(codigo))
       .reduce((s, row) => s + (Number(row.quantity) || 0), 0);
-    // `quantity_outgoing` vem negativo — subtrair soma o valor absoluto de volta ao estoque.
+    // `quantity_outgoing` já vem negativo — somar desconta a saída do estoque físico.
     const somaSaida = linhas.reduce((s, row) => s + (Number(row.quantity_outgoing) || 0), 0);
-    return Math.max(somaFisico - somaSaida, 0);
+    return Math.max(somaFisico + somaSaida, 0);
   });
 
   console.log(`[Estoque] ${matched}/${codigos.length} código(s) da planilha encontrados na resposta do ZenERP.`);
