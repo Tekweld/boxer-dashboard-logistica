@@ -361,8 +361,10 @@ function fetchComTimeout(url, options, timeoutMs) {
 }
 
 // Chamada genérica de API que nunca lança exceção — retorna { ok, data }.
-// Tenta de novo só em falha de rede/timeout (não em resposta HTTP de erro), com timeout curto
-// pra não travar a tela — se der ruim, quem chamou cai no fallback pra planilha rapidamente.
+// Tenta de novo só em falha de rede/timeout (não em resposta HTTP de erro) — se der ruim,
+// quem chamou cai no fallback pra planilha. Timeout padrão é curto (10s), mas os chamados
+// de payload grande (Recebimento, Estoque Físico/Disponibilidade, Catálogo) passam 25s
+// explicitamente, pois essas respostas podem ter vários MB e estourar 10s com facilidade.
 async function chamarApiJson(label, url, options, maxTentativas = 2, timeoutMs = 10000, intervaloEsperaMs = 3000) {
   let ultimoErro = null;
   for (let tentativa = 1; tentativa <= maxTentativas; tentativa++) {
@@ -412,7 +414,8 @@ async function fetchRecebimentoZenerp(codigos) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify(jsonBodyRecebimento)
-    }
+    },
+    2, 25000
   );
 
   if (!resultadoRecebimento.ok) return null;
@@ -482,7 +485,8 @@ async function fetchEstoqueZenerp(codigos) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify(jsonBodyEstoqueFisico)
-    }
+    },
+    2, 25000
   );
 
   if (!resultadoEstoqueFisico.ok) return null;
@@ -498,7 +502,8 @@ async function fetchEstoqueZenerp(codigos) {
         "Content-Type": "application/json"
       },
       body: JSON.stringify(jsonBodyEstoque)
-    }
+    },
+    2, 25000
   );
 
   if (!resultadoEstoque.ok) return null;
@@ -562,7 +567,8 @@ async function fetchCatalogoZenerp() {
         "Authorization": "Bearer " + ZENERP_TOKEN,
         "Content-Type": "application/json"
       }
-    }
+    },
+    2, 25000
   );
 
   if (!resultado.ok) return null;
